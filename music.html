@@ -1,0 +1,1752 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LQT Music</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        #main-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        #main-content::-webkit-scrollbar-thumb {
+            background-color: #4a5568;
+            border-radius: 4px;
+        }
+
+        #main-content::-webkit-scrollbar-track {
+            background-color: #1a202c;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+            margin-top: -5px;
+            transition: background 0.2s;
+        }
+
+        input[type="range"]#progress-bar::-webkit-slider-thumb {
+            background: #1DB954;
+        }
+
+        input[type="range"]#volume-bar::-webkit-slider-thumb {
+            background: #1DB954;
+        }
+
+        #volume-bar {
+            height: 4px;
+        }
+
+        #volume-bar::-webkit-slider-runnable-track {
+            background: #282828;
+            height: 4px;
+            border-radius: 2px;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-dark': '#121212',
+                        'secondary-dark': '#181818',
+                        'card-dark': '#282828',
+                        'accent-green': '#1DB954',
+                        'text-light': '#FFFFFF',
+                        'text-secondary': '#B3B3B3',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-primary-dark font-sans text-text-light antialiased">
+
+<script>
+    // DOM 引用
+    let audio;
+    let isPlaying = false;
+    let currentSong = null;
+
+    // --- 状态存储变量 (用于保留搜索历史) ---
+    let lastSearchContent = null;
+    let lastSearchTitle = null;
+
+    // --- 对接变量 ---
+    let currentSource = "kuwo";
+    let currentQuery = "星辰不坠落";
+    let currentQuality = 'exhigh';
+    // --- 新增: 播放模式状态 (0: 顺序播放, 1: 单曲循环) ---
+    let playMode = 0; // 0: Sequential, 1: Single Loop
+
+    // *** 新增: 播放列表当前播放的 DOM 元素，用于顺序播放下一首 ***
+    let currentPlayingElement = null;
+    // *** 新增: 点击防抖标志，防止短时间内重复播放 ***
+    let isSongClickProcessing = false;
+
+    // 播放模式 SVG 图标 (仅包含顺序播放和单曲循环)
+    const playModeIcons = [
+        // 0: 顺序播放图标 (List/Repeat) - 列表循环
+        // 使用 Repeat Icon
+        `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`,
+        // 1: 单曲循环图标 (Repeat Once)
+        `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><path d="M12 10l2-2 2 2"></path><path d="M12 15v-5"></path></svg>`
+    ];
+
+    /**
+     * 暂停所有动画，并在加载完成后恢复。
+     */
+    const temporarilyDisableTransitions = (element, callback) => {
+        element.style.transition = 'none';
+        callback();
+        // 使用 requestAnimationFrame 确保样式更新完成后再恢复
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                element.style.transition = '';
+            });
+        });
+    };
+
+    /**
+     * 格式化秒数为MM:ss
+     */
+    const formatTime = (seconds) => {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = Math.floor(seconds % 60);
+        const paddedSeconds = remainingSeconds < 10 ? '0' + remainingSeconds : remainingSeconds;
+        return `${minutes}:${paddedSeconds}`;
+    };
+
+
+    /**
+     * 搜索音乐并显示结果
+     */
+    async function searchMusic() {
+        const searchInput = document.getElementById('search-input');
+        const query = searchInput.value.trim();
+        currentQuery = query;
+        const resultsContainer = document.getElementById('music-list');
+        const listTitle = document.getElementById('list-title');
+
+        if (!query) {
+            listTitle.innerHTML = `<span class="text-xl font-bold">请输入搜索关键词</span>`;
+            resultsContainer.innerHTML = '';
+            // 搜索结果为空时，清空存储的历史内容，以便下次切换回来时显示默认提示
+            lastSearchContent = null;
+            lastSearchTitle = null;
+            return;
+        }
+
+        resultsContainer.innerHTML = `
+                <div class="flex items-center justify-center p-8">
+                    <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-accent-green"></div>
+                    <span class="ml-4 text-text-secondary">搜索中...</span>
+                </div>
+            `;
+        listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果</span>`;
+
+        /* 调用音乐搜索Api->Python */
+        try {
+            /**
+             * query 搜索关键字
+             */
+            const response = await pywebview.api.search(query,currentSource);
+            const data = await JSON.parse(response);
+
+
+            if (data.code === 200 && data.data.length > 0) {
+                renderResults(data.data, query);
+            } else {
+                resultsContainer.innerHTML = `<p class="text-text-secondary p-4">未找到相关音乐。</p>`;
+                listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果 (0 条)</span>`;
+            }
+
+            // 搜索完成后，将当前状态保存到历史记录中
+            lastSearchContent = resultsContainer.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+
+        } catch (error) {
+            console.error("搜索请求失败:", error);
+            resultsContainer.innerHTML = `<p class="text-red-400 p-4">搜索请求失败，请检查网络或 API 状态。</p>`;
+            // 发生错误时也保存状态
+            lastSearchContent = resultsContainer.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+        }
+    }
+
+    /**
+     * 渲染搜索结果列表
+     * @param {Array} songs - 歌曲数据数组
+     * @param {string} query - 搜索关键词
+     */
+    function renderResults(songs, query) {
+        const resultsContainer = document.getElementById('music-list');
+        const listTitle = document.getElementById('list-title');
+        listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果 (${songs.length} 条)</span>`;
+
+        let html = '';
+
+        // 列表头部
+        html += `
+                <div class="grid grid-cols-12 text-text-secondary text-sm font-semibold border-b border-card-dark pb-2 mb-2 top-0 bg-gray-800/90 backdrop-blur-sm z-10">
+                    <div class="col-span-1 text-center">#</div>
+                    <div class="col-span-6">歌曲名</div>
+                    <div class="col-span-4">艺人</div>
+                    <div class="col-span-1 text-right">ID</div>
+                </div>
+            `;
+
+        songs.forEach((song, index) => {
+            // 绑定点击事件，使用 data-song-data 存储 JSON 字符串
+            const songDataJson = JSON.stringify(song).replace(/"/g, '&quot;');
+            html += `
+                    <div class="song-item grid grid-cols-12 items-center p-2 rounded-lg hover:bg-card-dark transition-colors cursor-pointer"
+                         data-song-data="${songDataJson}" onclick="handleSongClick(this)">
+
+                        <div class="col-span-1 text-center text-text-secondary text-sm">${index + 1}</div>
+
+                        <div class="col-span-6 flex items-center space-x-3 truncate">
+                            <img src="${song.pic || 'https://placehold.co/40x40/333/fff?text=No+Cover'}"
+                                 onerror="this.onerror=null;this.src='https://placehold.co/40x40/333/fff?text=No+Cover';"
+                                 class="w-10 h-10 rounded-md object-cover shadow-md">
+                            <span class="font-medium text-text-light truncate" title="${song.name}">${song.name}</span>
+                        </div>
+
+                        <div class="col-span-4 text-text-secondary truncate" title="${song.artist}">${song.artist}</div>
+
+                        <div class="col-span-1 text-right text-text-secondary text-xs">${song.id}</div>
+                    </div>
+                `;
+        });
+
+        resultsContainer.innerHTML = html;
+    }
+
+    /**
+     * 处理歌曲点击事件
+     * @param {HTMLElement} element - 被点击的歌曲元素
+     */
+    function handleSongClick(element) {
+        // *** 修复点 1: 添加点击防抖逻辑 ***
+        if (isSongClickProcessing) {
+            console.log("忽略连续点击...");
+            return;
+        }
+
+        // 设置标志，防止短时间内二次点击 (500毫秒)
+        isSongClickProcessing = true;
+        setTimeout(() => {
+            isSongClickProcessing = false;
+        }, 500);
+
+        try {
+            // 解析存储在 data 属性中的歌曲数据
+            const songData = JSON.parse(element.getAttribute('data-song-data').replace(/&quot;/g, '"'));
+            playMusic(songData);
+
+            // 移除所有项目的 active 状态
+            document.querySelectorAll('.song-item').forEach(item => {
+                item.classList.remove('bg-accent-green', 'text-black');
+                item.classList.add('bg-card-dark/50', 'text-text-light');
+            });
+            // 添加当前播放项目的 active 状态
+            element.classList.add('bg-accent-green', 'text-black');
+            element.classList.remove('bg-card-dark/50', 'text-text-light');
+
+            // *** 存储当前播放的 DOM 元素引用 ***
+            currentPlayingElement = element;
+
+            // 确保在点击时更新保存的历史内容
+            lastSearchContent = document.getElementById('music-list').innerHTML;
+        } catch (e) {
+            console.error("解析歌曲数据失败:", e);
+            // 如果出错，也要重置标志
+            isSongClickProcessing = false;
+        }
+    }
+
+    /**
+     * 播放指定歌曲
+     * @param {Object} songData - 歌曲数据对象
+     */
+    async function playMusic(songData) {
+        // 确保 audio 元素已创建
+        if (!audio) {
+            audio = document.getElementById('audio-element');
+            // 绑定事件监听器
+            audio.addEventListener('loadedmetadata', updateDuration);
+            audio.addEventListener('timeupdate', updateProgressBar);
+            audio.addEventListener('ended', handleTrackEnd); // 绑定播放结束事件
+        }
+
+        // 构造完整的播放 URL，必须加上 uid 和 key
+        const fullUrl = await pywebview.api.get_url(songData.id,currentSource,currentQuality,currentQuery)
+        if(currentSource === "qq"){
+            songData.pic = await pywebview.api.get_img(songData.id,currentQuery);
+        }
+        currentSong = songData;
+        // 更新播放器信息
+        document.getElementById('player-name').textContent = songData.name;
+        document.getElementById('player-artist').textContent = songData.artist;
+        document.getElementById('player-cover').src = songData.pic || 'https://placehold.co/60x60/333/fff?text=No+Cover';
+        document.getElementById('player-cover').onerror = () => {
+            document.getElementById('player-cover').src = 'https://placehold.co/60x60/333/fff?text=No+Cover';
+        };
+
+
+        // 加载并播放音乐
+        audio.src = fullUrl;
+        // 根据 playMode (0:顺序, 1:单曲循环) 设置 loop
+        audio.loop = (playMode === 1);
+        audio.load();
+        audio.play().then(() => {
+            isPlaying = true;
+            updatePlayPauseButton();
+        }).catch(error => {
+            console.error("播放失败:", error);
+            // 使用自定义 UI 提示用户，而不是 alert()
+            showCustomMessage(`播放失败，可能这首歌没有${currentQuality}`, 'error');
+            isPlaying = false;
+            updatePlayPauseButton();
+        });
+    }
+
+    /**
+     * 播放/暂停控制
+     */
+    function togglePlayPause() {
+        if (!audio || !audio.src) {
+            showCustomMessage('请先在右侧搜索并选择一首歌曲。', 'info');
+            return;
+        }
+        if (isPlaying) {
+            audio.pause();
+        } else {
+            audio.play().catch(error => {
+                console.error("播放失败:", error);
+                showCustomMessage('播放失败，请重试。', 'error');
+            });
+        }
+        isPlaying = !isPlaying;
+        updatePlayPauseButton();
+    }
+
+    /**
+     * 更新播放/暂停按钮图标 (使用内联 SVG)
+     */
+    function updatePlayPauseButton() {
+        const playPauseIconContainer = document.getElementById('play-pause-icon');
+
+        // Play Icon SVG (Triangle)
+        const playSvg = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="black" stroke="none" class="w-6 h-6 ml-1">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>`;
+
+        // Pause Icon SVG (Two Rectangles)
+        const pauseSvg = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="black" stroke="none" class="w-6 h-6">
+                    <rect x="6" y="4" width="4" height="16"></rect>
+                    <rect x="14" y="4" width="4" height="16"></rect>
+                </svg>`;
+
+        if (isPlaying) {
+            playPauseIconContainer.innerHTML = pauseSvg;
+        } else {
+            playPauseIconContainer.innerHTML = playSvg;
+        }
+    }
+
+    /**
+     * 更新播放器总时长
+     */
+    function updateDuration() {
+        document.getElementById('current-duration').textContent = formatTime(audio.duration);
+        document.getElementById('progress-bar').max = audio.duration;
+    }
+
+    /**
+     * 更新播放进度条和当前时间
+     */
+    function updateProgressBar() {
+        const currentTimeDisplay = document.getElementById('current-time');
+        const progressBar = document.getElementById('progress-bar');
+        const progressFill = document.getElementById('progress-fill');
+
+        currentTimeDisplay.textContent = formatTime(audio.currentTime);
+        progressBar.value = audio.currentTime;
+
+        // 更新进度条的填充颜色
+        const percentage = (audio.currentTime / audio.duration) * 100;
+        progressFill.style.width = `${percentage}%`;
+    }
+
+    /**
+     * 拖动进度条跳转
+     */
+    function seekTrack(event) {
+        if (!audio || !audio.src) return;
+        const progressBar = event.currentTarget;
+        const clickX = event.clientX - progressBar.getBoundingClientRect().left;
+        const width = progressBar.offsetWidth;
+        const percentage = clickX / width;
+        const seekTime = audio.duration * percentage;
+        audio.currentTime = seekTime;
+    }
+
+    /**
+     * 处理歌曲播放结束
+     * *** 修复点 2: 增加顺序播放下一首逻辑 ***
+     */
+    function handleTrackEnd() {
+        isPlaying = false;
+        updatePlayPauseButton();
+        console.log('HandleTrackEnd');
+        // 如果是顺序播放模式 (0) 且当前元素存在，尝试播放下一首
+        // 注：单曲循环模式 (1) 由 audio.loop 属性自动处理
+        if (playMode === 0 && currentPlayingElement) {
+            console.log(currentPlayingElement);
+            // 查找下一个兄弟元素
+            let nextElement = currentPlayingElement.nextElementSibling;
+            console.log(nextElement);
+            // 如果没有下一个兄弟元素 (列表播完)，回到列表第一个 (列表循环)
+            if (!nextElement || !nextElement.classList.contains('song-item')) {
+                const musicList = document.getElementById('music-list');
+                // 确保列表非空且第一个元素是歌曲项
+                nextElement = musicList.querySelector('.song-item');
+            }
+
+            if (nextElement) {
+                console.log(`handleSongClick(${nextElement});`)
+                // 播放下一首，调用 handleSongClick 来处理播放、样式和 currentPlayingElement 的更新
+                handleSongClick(nextElement);
+            } else {
+                // 列表为空或只有一首歌且已播完
+                currentPlayingElement = null;
+            }
+        } else {
+            // 非顺序播放模式（如单曲循环），或无当前播放元素
+            currentPlayingElement = null;
+        }
+    }
+
+    /**
+     * 设置音量
+     */
+    function setVolume(event) {
+        if (!audio) return;
+        audio.volume = event.target.value;
+    }
+
+    /**
+     * 实现: 切换播放模式 (顺序播放, 单曲循环)
+     */
+    function togglePlayMode() {
+        // 只有 0 (顺序) 和 1 (单曲循环) 两种模式，使用 % 2 确保循环
+        playMode = (playMode + 1) % 2;
+
+        // 更新图标
+        document.getElementById('play-mode-icon').innerHTML = playModeIcons[playMode];
+
+        // 提示用户当前模式
+        let modeText = ['顺序播放', '单曲循环'][playMode];
+        showCustomMessage(`播放模式切换到: ${modeText}`, 'info');
+
+        // 更新 audio.loop 属性
+        if (audio) {
+            audio.loop = (playMode === 1);
+        }
+    }
+
+
+    /**
+     * 切换导航栏视图 (演示功能)
+     * @param {string} viewName - 视图名称 ('search', 'playlist', 'favorites', 'local', 'settings')
+     * @param {boolean} [isInitial=false] - 是否为首次加载
+     */
+    function switchView(viewName, isInitial = false) {
+        const listTitle = document.getElementById('list-title');
+        const musicList = document.getElementById('music-list');
+        const navItems = document.querySelectorAll('.nav-item');
+        // 使用 data 属性来跟踪当前视图
+        const currentView = listTitle.getAttribute('data-current-view');
+
+        // 1. 在切换到其他视图之前，如果当前是 'search' 视图，保存其内容
+        if (currentView === 'search' && !isInitial) {
+            lastSearchContent = musicList.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+        }
+
+        navItems.forEach(item => item.classList.remove('bg-card-dark'));
+        // 尝试获取新的导航项并激活
+        const newNavItem = document.getElementById(`${viewName}-nav`);
+        if (newNavItem) {
+            newNavItem.classList.add('bg-card-dark');
+        }
+        listTitle.setAttribute('data-current-view', viewName);
+
+        if (viewName === 'search') {
+            // 切换回搜索视图，尝试恢复历史记录
+            if (lastSearchContent && !isInitial) {
+                listTitle.innerHTML = lastSearchTitle;
+                musicList.innerHTML = lastSearchContent;
+            } else {
+                // 首次加载或没有历史记录，显示默认提示
+                listTitle.innerHTML = `<span class="text-3xl font-extrabold">欢迎使用！请在左侧搜索音乐</span>`;
+                musicList.innerHTML = `<p class="text-text-secondary p-4">输入歌曲名、艺人名等关键词进行搜索。</p>`;
+
+                // 首次加载时，保存初始状态
+                if (isInitial) {
+                    lastSearchContent = musicList.innerHTML;
+                    lastSearchTitle = listTitle.innerHTML;
+                }
+            }
+        } else if (viewName === 'playlist') {
+            listTitle.innerHTML = `<span class="text-xl font-bold">我的歌单 </span>`;
+            musicList.innerHTML = `
+                    <div class="p-4 space-y-2">
+                        <p class="text-text-secondary">这是一个演示歌单。要播放音乐，请切换到“搜索”并找到一首歌曲。</p>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 1 - 演示艺人</div>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 2 - 演示艺人</div>
+                    </div>
+                `;
+        } else if (viewName === 'favorites') {
+            listTitle.innerHTML = `<span class="text-xl font-bold">我喜欢的 </span>`;
+            musicList.innerHTML = `
+                    <div class="p-4 space-y-2">
+                        <p class="text-text-secondary">这是您喜欢的歌曲列表的演示界面。</p>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 3 - 演示艺人</div>
+                    </div>
+                `;
+        } else if (viewName === 'local') {
+             listTitle.innerHTML = `<span class="text-xl font-bold">本地音乐 </span>`;
+             musicList.innerHTML = `
+                     <div class="p-4 space-y-4">
+                         <p class="text-text-secondary">此区域用于管理您电脑上的本地音乐文件。</p>
+                         <button class="px-4 py-2 bg-accent-green text-black font-semibold rounded-full shadow-md hover:bg-green-600 transition-colors">
+                             导入本地文件夹
+                         </button>
+                         <div class="p-3 bg-card-dark rounded-lg text-text-secondary">
+                             <p class="font-bold text-text-light mb-1 border-b border-gray-600 pb-2">本地文件列表 (演示)</p>
+                             <div class="text-sm space-y-1 mt-2">
+                                <p class="truncate hover:text-text-light">本地音乐 - Beautiful Day.mp3</p>
+                                <p class="truncate hover:text-text-light">本地音乐 - Rainy Night.flac</p>
+                             </div>
+                         </div>
+                     </div>
+                 `;
+        } else if (viewName === 'settings') {
+             listTitle.innerHTML = `<span class="text-xl font-bold">设置 </span>`;
+             musicList.innerHTML = `
+                     <div class="p-4 space-y-6">
+                         <p class="text-text-secondary">配置您的应用选项。</p>
+
+                         <!-- 音源选择设置 -->
+                         <div class="p-4 bg-card-dark rounded-lg shadow-lg">
+                             <h3 class="font-bold text-text-light mb-3 text-lg border-b border-gray-700 pb-2">音乐源配置</h3>
+                             <div class="flex flex-col sm:flex-row sm:items-center justify-between space-y-3 sm:space-y-0">
+                                 <label for="audio-source" class="text-text-secondary w-full sm:w-1/3">选择音源:</label>
+                                 <select id="audio-source"
+                                     class="p-2 rounded-lg bg-secondary-dark text-text-light border border-gray-600 focus:ring-accent-green focus:border-accent-green transition-colors w-full sm:w-1/2">
+                                     <option value="kuwo" selected>小窝音乐(默认)</option>
+                                     <option value="netease">小易音乐</option>
+                                     <option value="qq">小Q音乐</option>
+                                 </select>
+                             </div>
+                             <div class="flex flex-col sm:flex-row sm:items-center justify-between space-y-3 sm:space-y-0">
+                                 <label for="audio-quality" class="text-text-secondary w-full sm:w-1/3">选择播放音质:</label>
+                                 <select id="audio-quality"
+                                     class="p-2 rounded-lg bg-secondary-dark text-text-light border border-gray-600 focus:ring-accent-green focus:border-accent-green transition-colors w-full sm:w-1/2">
+                                     <option value="standard">标准</option>
+                                     <option value="exhigh" selected>高品</option>
+                                     <option value="lossless">无损FLAC</option>
+                                     <option value="jymaster">高清母带(仅小易)
+                                      </option>
+                                 </select>
+                             </div>
+                             <div class="mt-5 flex justify-end">
+                                 <button onclick="saveSource()"
+                                         class="px-5 py-2 bg-accent-green text-black font-semibold rounded-full shadow-md hover:bg-green-600 transition-colors">
+                                     应用设置
+                                 </button>
+                             </div>
+                         </div>
+
+                         <!-- 其他通用设置 (演示) -->
+                         <div class="p-4 bg-card-dark rounded-lg shadow-lg">
+                             <h3 class="font-bold text-text-light mb-3 text-lg border-b border-gray-700 pb-2">通用设置</h3>
+                             <label class="flex items-center text-text-secondary hover:text-text-light transition-colors cursor-pointer">
+                                 <input type="checkbox" checked class="form-checkbox h-5 w-5 text-accent-green rounded bg-gray-600 border-gray-500 focus:ring-accent-green">
+                                 <span class="ml-3">启动时自动检查更新(演示)</span>
+                             </label>
+                         </div>
+                     </div>
+                 `;
+
+        }
+    }
+
+    /**
+     * 设置音源
+     *
+     */
+    function saveSource(){
+        const sel1 = document.getElementById('audio-source');
+        const sel2 = document.getElementById('audio-quality');
+        currentSource = sel1.value;
+        currentQuality = sel2.value;
+    }
+    /**
+     * 自定义消息框（替代 alert）
+     */
+    function showCustomMessage(message, type) {
+        const container = document.getElementById('message-container');
+        const bgColor = type === 'error' ? 'bg-red-500' : (type === 'info' ? 'bg-blue-500' : 'bg-green-500');
+
+        const messageElement = document.createElement('div');
+        messageElement.className = `p-3 rounded-lg shadow-xl mb-2 ${bgColor} text-white transition-all duration-300 transform opacity-0 translate-y-4`;
+        messageElement.textContent = message;
+
+        container.appendChild(messageElement);
+
+        // 动画效果：淡入
+        setTimeout(() => {
+            messageElement.classList.remove('opacity-0', 'translate-y-4');
+            messageElement.classList.add('opacity-100', 'translate-y-0');
+        }, 10);
+
+        // 自动消失
+        setTimeout(() => {
+            // 动画效果：淡出
+            messageElement.classList.remove('opacity-100', 'translate-y-0');
+            messageElement.classList.add('opacity-0', 'translate-y-4');
+
+            // 移除元素
+            setTimeout(() => {
+                container.removeChild(messageElement);
+            }, 300);
+        }, 3000);
+    }
+
+    // 初始化函数
+    window.onload = function() {
+        // 初始设置播放/暂停按钮
+        updatePlayPauseButton();
+        // 初始切换到搜索视图 (传递 true 表示首次加载)
+        switchView('search', true);
+
+        // 初始化音量条
+        const volumeBar = document.getElementById('volume-bar');
+        if (volumeBar) {
+            // 默认音量为 0.5 (50%)
+            volumeBar.value = 0.5;
+            // 确保 audio 对象在 playMusic 中创建时设置音量
+        }
+
+        // 初始设置播放模式图标为顺序播放 (索引 0)
+        document.getElementById('play-mode-icon').innerHTML = playModeIcons[playMode];
+
+        // 绑定进度条点击事件
+        document.getElementById('progress-bar-container').addEventListener('click', seekTrack);
+    }
+
+</script>
+
+<!-- 消息提示容器 (替代 alert) -->
+<div id="message-container" class="fixed top-4 right-4 z-[100] w-full max-w-sm">
+    <!-- 消息将通过 JS 动态添加 -->
+</div>
+
+<!-- 整个应用容器：固定高度，禁止全局滚动 -->
+<div class="h-screen overflow-hidden flex">
+
+    <!-- ==================================== -->
+    <!-- 1. 左侧固定导航栏 (Sidebar) - Z-index: 20 -->
+    <!-- ==================================== -->
+    <div class="fixed left-0 top-0 h-full w-64 bg-secondary-dark z-20 flex flex-col p-4">
+
+        <!-- 标志/Logo -->
+        <div class="p-2 mb-6 flex items-center">
+            <span class="w-8 h-8 rounded-full bg-accent-green mr-3 flex items-center justify-center font-bold text-black text-xl">L</span>
+            <span class="text-xl font-bold">DEMO Music</span>
+        </div>
+
+        <!-- 搜索框 -->
+        <div class="mb-4">
+            <div class="relative">
+                <input type="text" id="search-input" placeholder="搜索歌曲、艺人..."
+                       class="w-full p-2 pl-10 rounded-full bg-card-dark text-text-light placeholder-text-secondary focus:ring-2 focus:ring-accent-green focus:outline-none"
+                       onkeypress="if(event.key === 'Enter') searchMusic()">
+                <button onclick="searchMusic()" class="absolute left-0 top-0 mt-2 ml-3 text-text-secondary hover:text-accent-green">
+                    <!-- Search Icon (SVG) -->
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- 导航菜单 -->
+        <nav class="space-y-2 flex-grow">
+            <!-- 首页 / 搜索 -->
+            <a href="#" id="search-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('search')">
+                <!-- Home Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                    <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                </svg>
+                首页 / 搜索
+            </a>
+            <!-- 歌单 -->
+            <a href="#" id="playlist-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('playlist')">
+                <!-- List Music Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M21 15V6"></path>
+                    <path d="M17 12H3"></path>
+                    <path d="M17 6H3"></path>
+                    <path d="M7 18H3"></path>
+                    <path d="M13 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"></path>
+                </svg>
+                歌单
+            </a>
+            <!-- 喜欢 -->
+            <a href="#" id="favorites-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('favorites')">
+                <!-- Heart Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M20.42 4.58a5.4 5.4 0 0 0-7.66 0L12 5.34l-0.76-0.76a5.4 5.4 0 0 0-7.66 7.66L12 21.66l8.42-8.42a5.4 5.4 0 0 0 0-7.66z"></path>
+                </svg>
+                喜欢
+            </a>
+
+            <!-- 新增: 本地音乐 -->
+            <a href="#" id="local-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('local')">
+                <!-- Hard Drive Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                </svg>
+                本地音乐
+            </a>
+
+            <!-- 新增: 设置 -->
+            <a href="#" id="settings-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('settings')">
+                <!-- Settings Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09z"></path>
+                </svg>
+                设置
+            </a>
+        </nav>
+
+        <!-- 底部用户/信息占位 -->
+        <div class="mt-4 pt-4 border-t border-card-dark">
+            <p class="text-xs text-text-secondary">API Powered by cenguigui.cn</p>
+            <p class="text-xs text-text-secondary">Layout inspired by Spotify</p>
+        </div>
+    </div>
+
+    <!-- ==================================== -->
+    <!-- 2. 右侧主内容区域 - 包含内部滚动容器 -->
+    <!-- ==================================== -->
+    <!-- ml-64: 留出左侧导航栏空间 | pb-28: 留出底部播放器空间 -->
+    <div id="main-content-wrapper" class="flex-1 overflow-hidden ml-64 pb-28">
+        <!-- 实际内容容器：h-full 占据父容器所有高度，overflow-y-auto 允许内部滚动 -->
+        <div id="main-content" class="h-full overflow-y-auto p-6 bg-primary-dark">
+
+            <!-- 列表标题 (新增 data-current-view 属性用于JS逻辑) -->
+            <div id="list-title" class="mb-6" data-current-view="search">
+                <span class="text-3xl font-extrabold">欢迎使用！请在左侧搜索音乐</span>
+            </div>
+
+            <!-- 音乐列表容器 -->
+            <div id="music-list" class="space-y-1">
+                <p class="text-text-secondary p-4">输入歌曲名、艺人名等关键词进行搜索。</p>
+            </div>
+
+            <!-- 底部填充，确保列表最后一项不会被播放器遮挡 -->
+            <div class="h-10"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ==================================== -->
+<!-- 3. 底部固定播放器 - Z-index: 30 (覆盖左侧栏底部) -->
+<!-- ==================================== -->
+<div id="player" class="fixed bottom-0 left-0 w-full h-28 bg-secondary-dark z-30 shadow-2xl shadow-black/50 border-t border-card-dark p-4 flex items-center">
+
+    <!-- Audio 元素 (隐藏) -->
+    <audio id="audio-element" preload="auto"></audio>
+
+    <!-- A. 当前播放歌曲信息 (左侧) -->
+    <div class="flex items-center w-1/4">
+        <img id="player-cover" src="https://placehold.co/60x60/333/fff?text=Music" alt="Album Cover"
+             class="w-16 h-16 rounded-lg shadow-md mr-4 object-cover cursor-pointer">
+        <div>
+            <div id="player-name" class="font-bold text-lg truncate w-48">未选择歌曲</div>
+            <div id="player-artist" class="text-sm text-text-secondary truncate w-48">点击歌曲开始播放</div>
+        </div>
+    </div>
+
+    <!-- B. 播放控制和进度条 (中央) -->
+    <div class="flex flex-col items-center flex-grow mx-4">
+
+        <!-- 播放按钮 -->
+        <div class="flex items-center space-x-6 mb-2">
+            <!-- Previous Track (Mock) - SVG -->
+            <button class="text-text-secondary hover:text-text-light transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                    <polygon points="19 20 9 12 19 4 19 20"></polygon>
+                    <line x1="5" y1="19" x2="5" y2="5"></line>
+                </svg>
+            </button>
+
+            <!-- Play/Pause Button -->
+            <button id="play-pause-button" onclick="togglePlayPause()"
+                    class="w-10 h-10 bg-text-light rounded-full flex items-center justify-center shadow-lg hover:scale-105 transform transition-transform">
+                    <span id="play-pause-icon">
+                        <!-- Icon updated by JS (Play/Pause SVG) -->
+                    </span>
+            </button>
+
+            <!-- Next Track (Mock) - SVG -->
+            <button class="text-text-secondary hover:text-text-light transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                    <polygon points="5 4 15 12 5 20 5 4"></polygon>
+                    <line x1="19" y1="5" x2="19" y2="19"></line>
+                </svg>
+            </button>
+        </div>
+
+        <!-- 进度条 -->
+        <div class="flex items-center w-full max-w-xl space-x-3">
+            <span id="current-time" class="text-xs text-text-secondary w-8 text-center">0:00</span>
+
+            <!-- 自定义进度条容器 (用于点击跳转) -->
+            <div id="progress-bar-container" class="relative flex-grow h-1 bg-card-dark rounded-full cursor-pointer overflow-hidden">
+                <!-- 实际进度填充 -->
+                <div id="progress-fill" class="h-full bg-accent-green absolute top-0 left-0" style="width: 0%;"></div>
+                <!-- 拖动滑块模拟 -->
+                <input type="range" id="progress-bar" min="0" value="0" step="0.1"
+                       class="w-full h-1 absolute top-0 left-0 appearance-none bg-transparent cursor-pointer opacity-0"
+                       oninput="temporarilyDisableTransitions(this, () => audio && (audio.currentTime = this.value))">
+            </div>
+
+            <span id="current-duration" class="text-xs text-text-secondary w-8 text-center">0:00</span>
+        </div>
+
+    </div>
+
+    <!-- C. 音量控制和模式切换 (右侧) -->
+    <div class="flex items-center justify-end w-1/4 pr-4 space-x-4">
+
+        <!-- 新增: 播放顺序切换按钮 (演示) -->
+        <button onclick="togglePlayMode()" class="text-text-secondary hover:text-text-light transition-colors" title="切换播放模式 (顺序/单曲循环)">
+            <span id="play-mode-icon">
+                 <!-- 初始图标由 JS 设置 -->
+            </span>
+        </button>
+
+        <!-- 音量图标 -->
+        <button class="text-text-secondary hover:text-text-light transition-colors">
+            <!-- Volume Icon (SVG) -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            </svg>
+        </button>
+        <!-- 音量条 -->
+        <input type="range" id="volume-bar" min="0" max="1" step="0.01" value="0.5" oninput="setVolume(event)"
+               class="w-24 h-1 bg-card-dark rounded-full appearance-none cursor-pointer range-accent-green">
+    </div>
+
+</div>
+
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LQT Music</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        #main-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        #main-content::-webkit-scrollbar-thumb {
+            background-color: #4a5568;
+            border-radius: 4px;
+        }
+
+        #main-content::-webkit-scrollbar-track {
+            background-color: #1a202c;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
+            margin-top: -5px;
+            transition: background 0.2s;
+        }
+
+        input[type="range"]#progress-bar::-webkit-slider-thumb {
+            background: #1DB954;
+        }
+
+        input[type="range"]#volume-bar::-webkit-slider-thumb {
+            background: #1DB954;
+        }
+
+        #volume-bar {
+            height: 4px;
+        }
+
+        #volume-bar::-webkit-slider-runnable-track {
+            background: #282828;
+            height: 4px;
+            border-radius: 2px;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-dark': '#121212',
+                        'secondary-dark': '#181818',
+                        'card-dark': '#282828',
+                        'accent-green': '#1DB954',
+                        'text-light': '#FFFFFF',
+                        'text-secondary': '#B3B3B3',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-primary-dark font-sans text-text-light antialiased">
+
+<script>
+    // DOM 引用
+    let audio;
+    let isPlaying = false;
+    let currentSong = null;
+
+    // --- 状态存储变量 (用于保留搜索历史) ---
+    let lastSearchContent = null;
+    let lastSearchTitle = null;
+
+    // --- 对接变量 ---
+    let currentSource = "kuwo";
+    let currentQuery = "星辰不坠落";
+    let currentQuality = 'exhigh';
+    // --- 新增: 播放模式状态 (0: 顺序播放, 1: 单曲循环) ---
+    let playMode = 0; // 0: Sequential, 1: Single Loop
+
+    // *** 新增: 播放列表当前播放的 DOM 元素，用于顺序播放下一首 ***
+    let currentPlayingElement = null;
+    // *** 新增: 点击防抖标志，防止短时间内重复播放 ***
+    let isSongClickProcessing = false;
+
+    // 播放模式 SVG 图标 (仅包含顺序播放和单曲循环)
+    const playModeIcons = [
+        // 0: 顺序播放图标 (List/Repeat) - 列表循环
+        // 使用 Repeat Icon
+        `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`,
+        // 1: 单曲循环图标 (Repeat Once)
+        `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5"><path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><path d="M12 10l2-2 2 2"></path><path d="M12 15v-5"></path></svg>`
+    ];
+
+    /**
+     * 暂停所有动画，并在加载完成后恢复。
+     */
+    const temporarilyDisableTransitions = (element, callback) => {
+        element.style.transition = 'none';
+        callback();
+        // 使用 requestAnimationFrame 确保样式更新完成后再恢复
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                element.style.transition = '';
+            });
+        });
+    };
+
+    /**
+     * 格式化秒数为MM:ss
+     */
+    const formatTime = (seconds) => {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = Math.floor(seconds % 60);
+        const paddedSeconds = remainingSeconds < 10 ? '0' + remainingSeconds : remainingSeconds;
+        return `${minutes}:${paddedSeconds}`;
+    };
+
+
+    /**
+     * 搜索音乐并显示结果
+     */
+    async function searchMusic() {
+        const searchInput = document.getElementById('search-input');
+        const query = searchInput.value.trim();
+        currentQuery = query;
+        const resultsContainer = document.getElementById('music-list');
+        const listTitle = document.getElementById('list-title');
+
+        if (!query) {
+            listTitle.innerHTML = `<span class="text-xl font-bold">请输入搜索关键词</span>`;
+            resultsContainer.innerHTML = '';
+            // 搜索结果为空时，清空存储的历史内容，以便下次切换回来时显示默认提示
+            lastSearchContent = null;
+            lastSearchTitle = null;
+            return;
+        }
+
+        resultsContainer.innerHTML = `
+                <div class="flex items-center justify-center p-8">
+                    <div class="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-accent-green"></div>
+                    <span class="ml-4 text-text-secondary">搜索中...</span>
+                </div>
+            `;
+        listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果</span>`;
+
+        /* 调用音乐搜索Api->Python */
+        try {
+            /**
+             * query 搜索关键字
+             */
+            const response = await pywebview.api.search(query,currentSource);
+            const data = await JSON.parse(response);
+
+
+            if (data.code === 200 && data.data.length > 0) {
+                renderResults(data.data, query);
+            } else {
+                resultsContainer.innerHTML = `<p class="text-text-secondary p-4">未找到相关音乐。</p>`;
+                listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果 (0 条)</span>`;
+            }
+
+            // 搜索完成后，将当前状态保存到历史记录中
+            lastSearchContent = resultsContainer.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+
+        } catch (error) {
+            console.error("搜索请求失败:", error);
+            resultsContainer.innerHTML = `<p class="text-red-400 p-4">搜索请求失败，请检查网络或 API 状态。</p>`;
+            // 发生错误时也保存状态
+            lastSearchContent = resultsContainer.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+        }
+    }
+
+    /**
+     * 渲染搜索结果列表
+     * @param {Array} songs - 歌曲数据数组
+     * @param {string} query - 搜索关键词
+     */
+    function renderResults(songs, query) {
+        const resultsContainer = document.getElementById('music-list');
+        const listTitle = document.getElementById('list-title');
+        listTitle.innerHTML = `<span class="text-xl font-bold">搜索 "${query}" 的结果 (${songs.length} 条)</span>`;
+
+        let html = '';
+
+        // 列表头部
+        html += `
+                <div class="grid grid-cols-12 text-text-secondary text-sm font-semibold border-b border-card-dark pb-2 mb-2 top-0 bg-gray-800/90 backdrop-blur-sm z-10">
+                    <div class="col-span-1 text-center">#</div>
+                    <div class="col-span-6">歌曲名</div>
+                    <div class="col-span-4">艺人</div>
+                    <div class="col-span-1 text-right">ID</div>
+                </div>
+            `;
+
+        songs.forEach((song, index) => {
+            // 绑定点击事件，使用 data-song-data 存储 JSON 字符串
+            const songDataJson = JSON.stringify(song).replace(/"/g, '&quot;');
+            html += `
+                    <div class="song-item grid grid-cols-12 items-center p-2 rounded-lg hover:bg-card-dark transition-colors cursor-pointer"
+                         data-song-data="${songDataJson}" onclick="handleSongClick(this)">
+
+                        <div class="col-span-1 text-center text-text-secondary text-sm">${index + 1}</div>
+
+                        <div class="col-span-6 flex items-center space-x-3 truncate">
+                            <img src="${song.pic || 'https://placehold.co/40x40/333/fff?text=No+Cover'}"
+                                 onerror="this.onerror=null;this.src='https://placehold.co/40x40/333/fff?text=No+Cover';"
+                                 class="w-10 h-10 rounded-md object-cover shadow-md">
+                            <span class="font-medium text-text-light truncate" title="${song.name}">${song.name}</span>
+                        </div>
+
+                        <div class="col-span-4 text-text-secondary truncate" title="${song.artist}">${song.artist}</div>
+
+                        <div class="col-span-1 text-right text-text-secondary text-xs">${song.id}</div>
+                    </div>
+                `;
+        });
+
+        resultsContainer.innerHTML = html;
+    }
+
+    /**
+     * 处理歌曲点击事件
+     * @param {HTMLElement} element - 被点击的歌曲元素
+     */
+    function handleSongClick(element) {
+        // *** 修复点 1: 添加点击防抖逻辑 ***
+        if (isSongClickProcessing) {
+            console.log("忽略连续点击...");
+            return;
+        }
+
+        // 设置标志，防止短时间内二次点击 (500毫秒)
+        isSongClickProcessing = true;
+        setTimeout(() => {
+            isSongClickProcessing = false;
+        }, 500);
+
+        try {
+            // 解析存储在 data 属性中的歌曲数据
+            const songData = JSON.parse(element.getAttribute('data-song-data').replace(/&quot;/g, '"'));
+            playMusic(songData);
+
+            // 移除所有项目的 active 状态
+            document.querySelectorAll('.song-item').forEach(item => {
+                item.classList.remove('bg-accent-green', 'text-black');
+                item.classList.add('bg-card-dark/50', 'text-text-light');
+            });
+            // 添加当前播放项目的 active 状态
+            element.classList.add('bg-accent-green', 'text-black');
+            element.classList.remove('bg-card-dark/50', 'text-text-light');
+
+            // *** 存储当前播放的 DOM 元素引用 ***
+            currentPlayingElement = element;
+
+            // 确保在点击时更新保存的历史内容
+            lastSearchContent = document.getElementById('music-list').innerHTML;
+        } catch (e) {
+            console.error("解析歌曲数据失败:", e);
+            // 如果出错，也要重置标志
+            isSongClickProcessing = false;
+        }
+    }
+
+    /**
+     * 播放指定歌曲
+     * @param {Object} songData - 歌曲数据对象
+     */
+    async function playMusic(songData) {
+        // 确保 audio 元素已创建
+        if (!audio) {
+            audio = document.getElementById('audio-element');
+            // 绑定事件监听器
+            audio.addEventListener('loadedmetadata', updateDuration);
+            audio.addEventListener('timeupdate', updateProgressBar);
+            audio.addEventListener('ended', handleTrackEnd); // 绑定播放结束事件
+        }
+
+        // 构造完整的播放 URL，必须加上 uid 和 key
+        const fullUrl = await pywebview.api.get_url(songData.id,currentSource,currentQuality,currentQuery)
+        if(currentSource === "qq"){
+            songData.pic = await pywebview.api.get_img(songData.id,currentQuery);
+        }
+        currentSong = songData;
+        // 更新播放器信息
+        document.getElementById('player-name').textContent = songData.name;
+        document.getElementById('player-artist').textContent = songData.artist;
+        document.getElementById('player-cover').src = songData.pic || 'https://placehold.co/60x60/333/fff?text=No+Cover';
+        document.getElementById('player-cover').onerror = () => {
+            document.getElementById('player-cover').src = 'https://placehold.co/60x60/333/fff?text=No+Cover';
+        };
+
+
+        // 加载并播放音乐
+        audio.src = fullUrl;
+        // 根据 playMode (0:顺序, 1:单曲循环) 设置 loop
+        audio.loop = (playMode === 1);
+        audio.load();
+        audio.play().then(() => {
+            isPlaying = true;
+            updatePlayPauseButton();
+        }).catch(error => {
+            console.error("播放失败:", error);
+            // 使用自定义 UI 提示用户，而不是 alert()
+            showCustomMessage(`播放失败，可能这首歌没有${currentQuality}`, 'error');
+            isPlaying = false;
+            updatePlayPauseButton();
+        });
+    }
+
+    /**
+     * 播放/暂停控制
+     */
+    function togglePlayPause() {
+        if (!audio || !audio.src) {
+            showCustomMessage('请先在右侧搜索并选择一首歌曲。', 'info');
+            return;
+        }
+        if (isPlaying) {
+            audio.pause();
+        } else {
+            audio.play().catch(error => {
+                console.error("播放失败:", error);
+                showCustomMessage('播放失败，请重试。', 'error');
+            });
+        }
+        isPlaying = !isPlaying;
+        updatePlayPauseButton();
+    }
+
+    /**
+     * 更新播放/暂停按钮图标 (使用内联 SVG)
+     */
+    function updatePlayPauseButton() {
+        const playPauseIconContainer = document.getElementById('play-pause-icon');
+
+        // Play Icon SVG (Triangle)
+        const playSvg = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="black" stroke="none" class="w-6 h-6 ml-1">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>`;
+
+        // Pause Icon SVG (Two Rectangles)
+        const pauseSvg = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="black" stroke="none" class="w-6 h-6">
+                    <rect x="6" y="4" width="4" height="16"></rect>
+                    <rect x="14" y="4" width="4" height="16"></rect>
+                </svg>`;
+
+        if (isPlaying) {
+            playPauseIconContainer.innerHTML = pauseSvg;
+        } else {
+            playPauseIconContainer.innerHTML = playSvg;
+        }
+    }
+
+    /**
+     * 更新播放器总时长
+     */
+    function updateDuration() {
+        document.getElementById('current-duration').textContent = formatTime(audio.duration);
+        document.getElementById('progress-bar').max = audio.duration;
+    }
+
+    /**
+     * 更新播放进度条和当前时间
+     */
+    function updateProgressBar() {
+        const currentTimeDisplay = document.getElementById('current-time');
+        const progressBar = document.getElementById('progress-bar');
+        const progressFill = document.getElementById('progress-fill');
+
+        currentTimeDisplay.textContent = formatTime(audio.currentTime);
+        progressBar.value = audio.currentTime;
+
+        // 更新进度条的填充颜色
+        const percentage = (audio.currentTime / audio.duration) * 100;
+        progressFill.style.width = `${percentage}%`;
+    }
+
+    /**
+     * 拖动进度条跳转
+     */
+    function seekTrack(event) {
+        if (!audio || !audio.src) return;
+        const progressBar = event.currentTarget;
+        const clickX = event.clientX - progressBar.getBoundingClientRect().left;
+        const width = progressBar.offsetWidth;
+        const percentage = clickX / width;
+        const seekTime = audio.duration * percentage;
+        audio.currentTime = seekTime;
+    }
+
+    /**
+     * 处理歌曲播放结束
+     * *** 修复点 2: 增加顺序播放下一首逻辑 ***
+     */
+    function handleTrackEnd() {
+        isPlaying = false;
+        updatePlayPauseButton();
+        console.log('HandleTrackEnd');
+        // 如果是顺序播放模式 (0) 且当前元素存在，尝试播放下一首
+        // 注：单曲循环模式 (1) 由 audio.loop 属性自动处理
+        if (playMode === 0 && currentPlayingElement) {
+            console.log(currentPlayingElement);
+            // 查找下一个兄弟元素
+            let nextElement = currentPlayingElement.nextElementSibling;
+            console.log(nextElement);
+            // 如果没有下一个兄弟元素 (列表播完)，回到列表第一个 (列表循环)
+            if (!nextElement || !nextElement.classList.contains('song-item')) {
+                const musicList = document.getElementById('music-list');
+                // 确保列表非空且第一个元素是歌曲项
+                nextElement = musicList.querySelector('.song-item');
+            }
+
+            if (nextElement) {
+                console.log(`handleSongClick(${nextElement});`)
+                // 播放下一首，调用 handleSongClick 来处理播放、样式和 currentPlayingElement 的更新
+                handleSongClick(nextElement);
+            } else {
+                // 列表为空或只有一首歌且已播完
+                currentPlayingElement = null;
+            }
+        } else {
+            // 非顺序播放模式（如单曲循环），或无当前播放元素
+            currentPlayingElement = null;
+        }
+    }
+
+    /**
+     * 设置音量
+     */
+    function setVolume(event) {
+        if (!audio) return;
+        audio.volume = event.target.value;
+    }
+
+    /**
+     * 实现: 切换播放模式 (顺序播放, 单曲循环)
+     */
+    function togglePlayMode() {
+        // 只有 0 (顺序) 和 1 (单曲循环) 两种模式，使用 % 2 确保循环
+        playMode = (playMode + 1) % 2;
+
+        // 更新图标
+        document.getElementById('play-mode-icon').innerHTML = playModeIcons[playMode];
+
+        // 提示用户当前模式
+        let modeText = ['顺序播放', '单曲循环'][playMode];
+        showCustomMessage(`播放模式切换到: ${modeText}`, 'info');
+
+        // 更新 audio.loop 属性
+        if (audio) {
+            audio.loop = (playMode === 1);
+        }
+    }
+
+
+    /**
+     * 切换导航栏视图 (演示功能)
+     * @param {string} viewName - 视图名称 ('search', 'playlist', 'favorites', 'local', 'settings')
+     * @param {boolean} [isInitial=false] - 是否为首次加载
+     */
+    function switchView(viewName, isInitial = false) {
+        const listTitle = document.getElementById('list-title');
+        const musicList = document.getElementById('music-list');
+        const navItems = document.querySelectorAll('.nav-item');
+        // 使用 data 属性来跟踪当前视图
+        const currentView = listTitle.getAttribute('data-current-view');
+
+        // 1. 在切换到其他视图之前，如果当前是 'search' 视图，保存其内容
+        if (currentView === 'search' && !isInitial) {
+            lastSearchContent = musicList.innerHTML;
+            lastSearchTitle = listTitle.innerHTML;
+        }
+
+        navItems.forEach(item => item.classList.remove('bg-card-dark'));
+        // 尝试获取新的导航项并激活
+        const newNavItem = document.getElementById(`${viewName}-nav`);
+        if (newNavItem) {
+            newNavItem.classList.add('bg-card-dark');
+        }
+        listTitle.setAttribute('data-current-view', viewName);
+
+        if (viewName === 'search') {
+            // 切换回搜索视图，尝试恢复历史记录
+            if (lastSearchContent && !isInitial) {
+                listTitle.innerHTML = lastSearchTitle;
+                musicList.innerHTML = lastSearchContent;
+            } else {
+                // 首次加载或没有历史记录，显示默认提示
+                listTitle.innerHTML = `<span class="text-3xl font-extrabold">欢迎使用！请在左侧搜索音乐</span>`;
+                musicList.innerHTML = `<p class="text-text-secondary p-4">输入歌曲名、艺人名等关键词进行搜索。</p>`;
+
+                // 首次加载时，保存初始状态
+                if (isInitial) {
+                    lastSearchContent = musicList.innerHTML;
+                    lastSearchTitle = listTitle.innerHTML;
+                }
+            }
+        } else if (viewName === 'playlist') {
+            listTitle.innerHTML = `<span class="text-xl font-bold">我的歌单 </span>`;
+            musicList.innerHTML = `
+                    <div class="p-4 space-y-2">
+                        <p class="text-text-secondary">这是一个演示歌单。要播放音乐，请切换到“搜索”并找到一首歌曲。</p>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 1 - 演示艺人</div>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 2 - 演示艺人</div>
+                    </div>
+                `;
+        } else if (viewName === 'favorites') {
+            listTitle.innerHTML = `<span class="text-xl font-bold">我喜欢的 </span>`;
+            musicList.innerHTML = `
+                    <div class="p-4 space-y-2">
+                        <p class="text-text-secondary">这是您喜欢的歌曲列表的演示界面。</p>
+                        <div class="bg-card-dark p-3 rounded-md">演示歌曲 3 - 演示艺人</div>
+                    </div>
+                `;
+        } else if (viewName === 'local') {
+             listTitle.innerHTML = `<span class="text-xl font-bold">本地音乐 </span>`;
+             musicList.innerHTML = `
+                     <div class="p-4 space-y-4">
+                         <p class="text-text-secondary">此区域用于管理您电脑上的本地音乐文件。</p>
+                         <button class="px-4 py-2 bg-accent-green text-black font-semibold rounded-full shadow-md hover:bg-green-600 transition-colors">
+                             导入本地文件夹
+                         </button>
+                         <div class="p-3 bg-card-dark rounded-lg text-text-secondary">
+                             <p class="font-bold text-text-light mb-1 border-b border-gray-600 pb-2">本地文件列表 (演示)</p>
+                             <div class="text-sm space-y-1 mt-2">
+                                <p class="truncate hover:text-text-light">本地音乐 - Beautiful Day.mp3</p>
+                                <p class="truncate hover:text-text-light">本地音乐 - Rainy Night.flac</p>
+                             </div>
+                         </div>
+                     </div>
+                 `;
+        } else if (viewName === 'settings') {
+             listTitle.innerHTML = `<span class="text-xl font-bold">设置 </span>`;
+             musicList.innerHTML = `
+                     <div class="p-4 space-y-6">
+                         <p class="text-text-secondary">配置您的应用选项。</p>
+
+                         <!-- 音源选择设置 -->
+                         <div class="p-4 bg-card-dark rounded-lg shadow-lg">
+                             <h3 class="font-bold text-text-light mb-3 text-lg border-b border-gray-700 pb-2">音乐源配置</h3>
+                             <div class="flex flex-col sm:flex-row sm:items-center justify-between space-y-3 sm:space-y-0">
+                                 <label for="audio-source" class="text-text-secondary w-full sm:w-1/3">选择音源:</label>
+                                 <select id="audio-source"
+                                     class="p-2 rounded-lg bg-secondary-dark text-text-light border border-gray-600 focus:ring-accent-green focus:border-accent-green transition-colors w-full sm:w-1/2">
+                                     <option value="kuwo" selected>小窝音乐(默认)</option>
+                                     <option value="netease">小易音乐</option>
+                                     <option value="qq">小Q音乐</option>
+                                 </select>
+                             </div>
+                             <div class="flex flex-col sm:flex-row sm:items-center justify-between space-y-3 sm:space-y-0">
+                                 <label for="audio-quality" class="text-text-secondary w-full sm:w-1/3">选择播放音质:</label>
+                                 <select id="audio-quality"
+                                     class="p-2 rounded-lg bg-secondary-dark text-text-light border border-gray-600 focus:ring-accent-green focus:border-accent-green transition-colors w-full sm:w-1/2">
+                                     <option value="standard">标准</option>
+                                     <option value="exhigh" selected>高品</option>
+                                     <option value="lossless">无损FLAC</option>
+                                     <option value="jymaster">高清母带(仅小易)
+                                      </option>
+                                 </select>
+                             </div>
+                             <div class="mt-5 flex justify-end">
+                                 <button onclick="saveSource()"
+                                         class="px-5 py-2 bg-accent-green text-black font-semibold rounded-full shadow-md hover:bg-green-600 transition-colors">
+                                     应用设置
+                                 </button>
+                             </div>
+                         </div>
+
+                         <!-- 其他通用设置 (演示) -->
+                         <div class="p-4 bg-card-dark rounded-lg shadow-lg">
+                             <h3 class="font-bold text-text-light mb-3 text-lg border-b border-gray-700 pb-2">通用设置</h3>
+                             <label class="flex items-center text-text-secondary hover:text-text-light transition-colors cursor-pointer">
+                                 <input type="checkbox" checked class="form-checkbox h-5 w-5 text-accent-green rounded bg-gray-600 border-gray-500 focus:ring-accent-green">
+                                 <span class="ml-3">启动时自动检查更新(演示)</span>
+                             </label>
+                         </div>
+                     </div>
+                 `;
+
+        }
+    }
+
+    /**
+     * 设置音源
+     *
+     */
+    function saveSource(){
+        const sel1 = document.getElementById('audio-source');
+        const sel2 = document.getElementById('audio-quality');
+        currentSource = sel1.value;
+        currentQuality = sel2.value;
+    }
+    /**
+     * 自定义消息框（替代 alert）
+     */
+    function showCustomMessage(message, type) {
+        const container = document.getElementById('message-container');
+        const bgColor = type === 'error' ? 'bg-red-500' : (type === 'info' ? 'bg-blue-500' : 'bg-green-500');
+
+        const messageElement = document.createElement('div');
+        messageElement.className = `p-3 rounded-lg shadow-xl mb-2 ${bgColor} text-white transition-all duration-300 transform opacity-0 translate-y-4`;
+        messageElement.textContent = message;
+
+        container.appendChild(messageElement);
+
+        // 动画效果：淡入
+        setTimeout(() => {
+            messageElement.classList.remove('opacity-0', 'translate-y-4');
+            messageElement.classList.add('opacity-100', 'translate-y-0');
+        }, 10);
+
+        // 自动消失
+        setTimeout(() => {
+            // 动画效果：淡出
+            messageElement.classList.remove('opacity-100', 'translate-y-0');
+            messageElement.classList.add('opacity-0', 'translate-y-4');
+
+            // 移除元素
+            setTimeout(() => {
+                container.removeChild(messageElement);
+            }, 300);
+        }, 3000);
+    }
+
+    // 初始化函数
+    window.onload = function() {
+        // 初始设置播放/暂停按钮
+        updatePlayPauseButton();
+        // 初始切换到搜索视图 (传递 true 表示首次加载)
+        switchView('search', true);
+
+        // 初始化音量条
+        const volumeBar = document.getElementById('volume-bar');
+        if (volumeBar) {
+            // 默认音量为 0.5 (50%)
+            volumeBar.value = 0.5;
+            // 确保 audio 对象在 playMusic 中创建时设置音量
+        }
+
+        // 初始设置播放模式图标为顺序播放 (索引 0)
+        document.getElementById('play-mode-icon').innerHTML = playModeIcons[playMode];
+
+        // 绑定进度条点击事件
+        document.getElementById('progress-bar-container').addEventListener('click', seekTrack);
+    }
+
+</script>
+
+<!-- 消息提示容器 (替代 alert) -->
+<div id="message-container" class="fixed top-4 right-4 z-[100] w-full max-w-sm">
+    <!-- 消息将通过 JS 动态添加 -->
+</div>
+
+<!-- 整个应用容器：固定高度，禁止全局滚动 -->
+<div class="h-screen overflow-hidden flex">
+
+    <!-- ==================================== -->
+    <!-- 1. 左侧固定导航栏 (Sidebar) - Z-index: 20 -->
+    <!-- ==================================== -->
+    <div class="fixed left-0 top-0 h-full w-64 bg-secondary-dark z-20 flex flex-col p-4">
+
+        <!-- 标志/Logo -->
+        <div class="p-2 mb-6 flex items-center">
+            <span class="w-8 h-8 rounded-full bg-accent-green mr-3 flex items-center justify-center font-bold text-black text-xl">L</span>
+            <span class="text-xl font-bold">DEMO Music</span>
+        </div>
+
+        <!-- 搜索框 -->
+        <div class="mb-4">
+            <div class="relative">
+                <input type="text" id="search-input" placeholder="搜索歌曲、艺人..."
+                       class="w-full p-2 pl-10 rounded-full bg-card-dark text-text-light placeholder-text-secondary focus:ring-2 focus:ring-accent-green focus:outline-none"
+                       onkeypress="if(event.key === 'Enter') searchMusic()">
+                <button onclick="searchMusic()" class="absolute left-0 top-0 mt-2 ml-3 text-text-secondary hover:text-accent-green">
+                    <!-- Search Icon (SVG) -->
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- 导航菜单 -->
+        <nav class="space-y-2 flex-grow">
+            <!-- 首页 / 搜索 -->
+            <a href="#" id="search-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('search')">
+                <!-- Home Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                    <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                </svg>
+                首页 / 搜索
+            </a>
+            <!-- 歌单 -->
+            <a href="#" id="playlist-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('playlist')">
+                <!-- List Music Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M21 15V6"></path>
+                    <path d="M17 12H3"></path>
+                    <path d="M17 6H3"></path>
+                    <path d="M7 18H3"></path>
+                    <path d="M13 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"></path>
+                </svg>
+                歌单
+            </a>
+            <!-- 喜欢 -->
+            <a href="#" id="favorites-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('favorites')">
+                <!-- Heart Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M20.42 4.58a5.4 5.4 0 0 0-7.66 0L12 5.34l-0.76-0.76a5.4 5.4 0 0 0-7.66 7.66L12 21.66l8.42-8.42a5.4 5.4 0 0 0 0-7.66z"></path>
+                </svg>
+                喜欢
+            </a>
+
+            <!-- 新增: 本地音乐 -->
+            <a href="#" id="local-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('local')">
+                <!-- Hard Drive Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                </svg>
+                本地音乐
+            </a>
+
+            <!-- 新增: 设置 -->
+            <a href="#" id="settings-nav" class="nav-item flex items-center p-3 rounded-lg text-text-secondary hover:text-text-light hover:bg-card-dark transition-colors" onclick="switchView('settings')">
+                <!-- Settings Icon (SVG) -->
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 mr-3">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09z"></path>
+                </svg>
+                设置
+            </a>
+        </nav>
+
+        <!-- 底部用户/信息占位 -->
+        <div class="mt-4 pt-4 border-t border-card-dark">
+            <p class="text-xs text-text-secondary">API Powered by cenguigui.cn</p>
+            <p class="text-xs text-text-secondary">Layout inspired by Spotify</p>
+        </div>
+    </div>
+
+    <!-- ==================================== -->
+    <!-- 2. 右侧主内容区域 - 包含内部滚动容器 -->
+    <!-- ==================================== -->
+    <!-- ml-64: 留出左侧导航栏空间 | pb-28: 留出底部播放器空间 -->
+    <div id="main-content-wrapper" class="flex-1 overflow-hidden ml-64 pb-28">
+        <!-- 实际内容容器：h-full 占据父容器所有高度，overflow-y-auto 允许内部滚动 -->
+        <div id="main-content" class="h-full overflow-y-auto p-6 bg-primary-dark">
+
+            <!-- 列表标题 (新增 data-current-view 属性用于JS逻辑) -->
+            <div id="list-title" class="mb-6" data-current-view="search">
+                <span class="text-3xl font-extrabold">欢迎使用！请在左侧搜索音乐</span>
+            </div>
+
+            <!-- 音乐列表容器 -->
+            <div id="music-list" class="space-y-1">
+                <p class="text-text-secondary p-4">输入歌曲名、艺人名等关键词进行搜索。</p>
+            </div>
+
+            <!-- 底部填充，确保列表最后一项不会被播放器遮挡 -->
+            <div class="h-10"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ==================================== -->
+<!-- 3. 底部固定播放器 - Z-index: 30 (覆盖左侧栏底部) -->
+<!-- ==================================== -->
+<div id="player" class="fixed bottom-0 left-0 w-full h-28 bg-secondary-dark z-30 shadow-2xl shadow-black/50 border-t border-card-dark p-4 flex items-center">
+
+    <!-- Audio 元素 (隐藏) -->
+    <audio id="audio-element" preload="auto"></audio>
+
+    <!-- A. 当前播放歌曲信息 (左侧) -->
+    <div class="flex items-center w-1/4">
+        <img id="player-cover" src="https://placehold.co/60x60/333/fff?text=Music" alt="Album Cover"
+             class="w-16 h-16 rounded-lg shadow-md mr-4 object-cover cursor-pointer">
+        <div>
+            <div id="player-name" class="font-bold text-lg truncate w-48">未选择歌曲</div>
+            <div id="player-artist" class="text-sm text-text-secondary truncate w-48">点击歌曲开始播放</div>
+        </div>
+    </div>
+
+    <!-- B. 播放控制和进度条 (中央) -->
+    <div class="flex flex-col items-center flex-grow mx-4">
+
+        <!-- 播放按钮 -->
+        <div class="flex items-center space-x-6 mb-2">
+            <!-- Previous Track (Mock) - SVG -->
+            <button class="text-text-secondary hover:text-text-light transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                    <polygon points="19 20 9 12 19 4 19 20"></polygon>
+                    <line x1="5" y1="19" x2="5" y2="5"></line>
+                </svg>
+            </button>
+
+            <!-- Play/Pause Button -->
+            <button id="play-pause-button" onclick="togglePlayPause()"
+                    class="w-10 h-10 bg-text-light rounded-full flex items-center justify-center shadow-lg hover:scale-105 transform transition-transform">
+                    <span id="play-pause-icon">
+                        <!-- Icon updated by JS (Play/Pause SVG) -->
+                    </span>
+            </button>
+
+            <!-- Next Track (Mock) - SVG -->
+            <button class="text-text-secondary hover:text-text-light transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                    <polygon points="5 4 15 12 5 20 5 4"></polygon>
+                    <line x1="19" y1="5" x2="19" y2="19"></line>
+                </svg>
+            </button>
+        </div>
+
+        <!-- 进度条 -->
+        <div class="flex items-center w-full max-w-xl space-x-3">
+            <span id="current-time" class="text-xs text-text-secondary w-8 text-center">0:00</span>
+
+            <!-- 自定义进度条容器 (用于点击跳转) -->
+            <div id="progress-bar-container" class="relative flex-grow h-1 bg-card-dark rounded-full cursor-pointer overflow-hidden">
+                <!-- 实际进度填充 -->
+                <div id="progress-fill" class="h-full bg-accent-green absolute top-0 left-0" style="width: 0%;"></div>
+                <!-- 拖动滑块模拟 -->
+                <input type="range" id="progress-bar" min="0" value="0" step="0.1"
+                       class="w-full h-1 absolute top-0 left-0 appearance-none bg-transparent cursor-pointer opacity-0"
+                       oninput="temporarilyDisableTransitions(this, () => audio && (audio.currentTime = this.value))">
+            </div>
+
+            <span id="current-duration" class="text-xs text-text-secondary w-8 text-center">0:00</span>
+        </div>
+
+    </div>
+
+    <!-- C. 音量控制和模式切换 (右侧) -->
+    <div class="flex items-center justify-end w-1/4 pr-4 space-x-4">
+
+        <!-- 新增: 播放顺序切换按钮 (演示) -->
+        <button onclick="togglePlayMode()" class="text-text-secondary hover:text-text-light transition-colors" title="切换播放模式 (顺序/单曲循环)">
+            <span id="play-mode-icon">
+                 <!-- 初始图标由 JS 设置 -->
+            </span>
+        </button>
+
+        <!-- 音量图标 -->
+        <button class="text-text-secondary hover:text-text-light transition-colors">
+            <!-- Volume Icon (SVG) -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            </svg>
+        </button>
+        <!-- 音量条 -->
+        <input type="range" id="volume-bar" min="0" max="1" step="0.01" value="0.5" oninput="setVolume(event)"
+               class="w-24 h-1 bg-card-dark rounded-full appearance-none cursor-pointer range-accent-green">
+    </div>
+
+</div>
+
+</body>
+</html>
